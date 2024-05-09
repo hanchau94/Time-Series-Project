@@ -1,0 +1,631 @@
+---
+title: ""
+output: pdf_document
+date: "2024-04-10"
+---
+
+```{r, echo = FALSE,warning=FALSE}
+suppressMessages({
+  library(TSA)
+  library(CADFtest)
+  library(forecast)
+  library(rugarch)
+  library(tseries)
+  library(fGarch)
+  library(ggplot2)
+})
+```
+
+## 1. Seasonal Dataset:
+  
+The dataset sourced from Kaggle encompasses monthly sales figures for trucks from a particular company spanning the years 2003 to 2014 including 144 observations recording monthly. 
+
+```{r,echo = FALSE}
+Truck_sales <- read.csv("data/Truck_sales.csv")
+summary(Truck_sales)
+```
+
+```{r,echo = FALSE}
+truck_data = Truck_sales$Number_Trucks_Sold
+par(mfrow = c(1, 1), mar = c(5, 5, 3, 2) + 0.1)
+plot(ts(truck_data, frequency=12, start=(2003)), ylab='Montly Truck Sales',
+     col='blue',lwd=2, main = 'The monthly sales for trucks from 2003 to 2014')
+```
+
+Looking at the plot of this data, we observe a growth trend throughout each year, delineated by 12-month cycles. Notably, truck sales peak during the summer months, particularly in August, before declining during the winter season.
+The data exhibit a consistent upward trend, indicating that the mean is dependent on time (t). Additionally, the autocorrelation function (ACF) demonstrates a gradual decrease in lags, with an increase starting at lag 7. Consequently, this dataset is non-stationary, necessitating the application of methods to achieve stationarity.
+
+```{r, echo=FALSE}
+par(mfrow=c(1,2))
+acf(truck_data, lag.max = 20,main='ACF for the original dataset')
+pacf(truck_data, lag.max=20,main='PACF for the original dataset')
+```
+
+```{r}
+CADFtest(diff(truck_data),type = "trend", max.lag.y = 12)
+```
+
+
+Initially, we opted to achieve stationarity in the series by applying differencing. The Dickey-Fuller Test serves as a tool to ascertain whether the series attains stationarity. Considering the seasonal nature of the series, characterized by cycles occurring every 12 months, I specified the max.lag.y hyperparameter as 12 for the test. Consequently, the obtained p-value from this test is 0.09. Therefore, we fail to reject the null hypothesis, suggesting the presence of a unit root in an AR model and indicating that the data series remains non-stationary.
+
+```{r,echo=FALSE}
+CADFtest(diff(diff(truck_data),lag=12),type = "trend", max.lag.y = 12)
+par(mfrow=c(1,2))
+acf(as.vector(diff(diff(truck_data),lag=12)), lag.max=50, main='ACF')
+pacf(as.vector(diff(diff(truck_data),lag=12)), lag.max=50, main='PACF')
+```
+
+```{r}
+shapiro.test(truck_data)
+```
+
+When conducting the Dickey-Fuller Test for diff(diff(data), lag=12), we reject the null hypothesis. However, despite this rejection, the ACF and PACF plots do not provide clear indications, making it difficult to determine the exact number of parameters for the models. In light of this ambiguity, we opt to apply Variance stabilization through the Box-Cox transformation to the dataset. This transformation aims to identify the appropriate lambda value for adjustment, facilitating a more accurate modeling process.
+
+```{r, warning=FALSE}
+bx = BoxCox.ar(truck_data)
+```
+
+```{r,echo=FALSE}
+log_data = log(truck_data)
+cube_root = truck_data^(1/3)
+par(mfrow=c(2,1))
+plot(ts(log_data, frequency=12, start=(2003)), ylab='Montly Truck Sales',
+     col='blue',lwd=2, main='Tranformation with log')
+plot(ts(cube_root, frequency=12, start=(2003)), ylab='Montly Truck Sales',
+     col='blue',lwd=2, main = 'Tranformation with cube root')
+plot(ts(diff(log_data), frequency=12, start=(2003)), ylab='Montly Truck Sales',
+     col='blue',lwd=2, main='Transformation with log and differencing')
+plot(ts(diff(cube_root), frequency=12, start=(2003)), ylab='Montly Truck Sales',
+     col='blue',lwd=2, main = 'Transformation with cube root and differencing')
+```
+
+The Box-Cox transformation indicated $\lambda$ = 0.3 as the optimal choice. While using the cube root of the data is an alternative, we must weigh the interpretability of the transformed variable and its suitability for subsequent analysis. Based on the combined plot of transformation and differencing, it is evident that even with the cube root transformation, there is a variance dependence on t. Consequently, we opt for $\lambda$= 0 and proceed with a log-transformation for each observation.
+
+```{r}
+diff_data = diff(log_data)
+CADFtest(diff_data,type = "trend", max.lag.y = 12)
+```
+```{r}
+seasonal_data = diff(diff_data, lag=12)
+CADFtest(seasonal_data,type = "trend", max.lag.y = 12)
+```
+
+Based on the results of the ADF test, with a p-value of 0.05, we can reject the null hypothesis, indicating that the series is stationary. Furthermore, considering this dataset as a seasonal time series with a cycle of 12 months, we perform differencing with a lag of 12. The resulting p-value of 0.003 leads us to accept that this series is also stationary.
+
+To determine the number of parameters, we base on the ACF and PACF plot.
+
+```{r, echo=FALSE}
+par(mfrow=c(1,2))
+acf(as.vector(seasonal_data), lag.max=50, main='ACF for seasonal series')
+pacf(as.vector(seasonal_data), lag.max=50, main='PACF for seasonal series')
+```
+
+
+Looking at these plots, we can discern the following:
+
+- In the nonseasonal component, there is one significant lag in both the ACF and PACF plots, suggesting potential values for q (for MA) and p (for AR) models, including 0 and 1.
+- In the seasonal component, a significant lag appears at lag 12 in both ACF and PACF plots, indicating possible values for Q (for seasonal MA) and P (for seasonal AR) models, also including 0 and 1.
+
+Since the series exhibits both nonseasonal and seasonal components, we opt for a Multiplicative SARMA(p,d,q) × (P,D,Q)s model. Therefore, Consequently, we explore several potential models, such as SARIMA(0,1,1)x(1,1,1)[12], SARIMA(1,1,0)x(1,1,1)[12], SARIMA(1,1,1)x(1,1,1)[12], SARIMA(0,1,1)x(0,1,1)[12], SARIMA(1,1,0)x(0,1,1)[12], SARIMA(1,1,1)x(0,1,1)[12], SARIMA(0,1,1)x(1,1,0)[12], SARIMA(1,1,0)x(1,1,0)[12], and SARIMA(1,1,1)x(1,1,0)[12].
+
+
+```{r,echo=FALSE}
+model_sea_1 = Arima(truck_data, order=c(0, 1, 1), seasonal=list(order = c(1, 1, 1), period = 12),lambda=0)
+model_sea_2 = Arima(truck_data, order=c(1, 1, 0), seasonal=list(order = c(1, 1, 1), period = 12),lambda=0)
+model_sea_3 = Arima(truck_data, order=c(1, 1, 1), seasonal=list(order = c(1, 1, 1), period = 12),lambda=0)
+model_sea_4 = Arima(truck_data, order=c(0, 1, 1), seasonal=list(order = c(0, 1, 1), period = 12),lambda=0)
+model_sea_5 = Arima(truck_data, order=c(1, 1, 0), seasonal=list(order = c(0, 1, 1), period = 12),lambda=0)
+model_sea_6 = Arima(truck_data, order=c(1, 1, 1), seasonal=list(order = c(0, 1, 1), period = 12),lambda=0)
+model_sea_7 = Arima(truck_data, order=c(0, 1, 1), seasonal=list(order = c(1, 1, 0), period = 12),lambda=0)
+model_sea_8 = Arima(truck_data, order=c(1, 1, 0), seasonal=list(order = c(1, 1, 0), period = 12),lambda=0)
+model_sea_9 = Arima(truck_data, order=c(1, 1, 1), seasonal=list(order = c(1, 1, 0), period = 12),lambda=0)
+model_sea_1; model_sea_2; model_sea_3; model_sea_4; model_sea_5; model_sea_6
+model_sea_7; model_sea_8; model_sea_9
+```
+
+
+```{r,echo=FALSE}
+df = data.frame(
+    Index = c(1:9),
+    Models = c('SARIMA(0,1,1)x(1,1,1)[12]','SARIMA(1,1,0)x(1,1,1)[12]','SARIMA(1,1,1)x(1,1,1)[12]',
+               'SARIMA(0,1,1)x(0,1,1)[12]',' SARIMA(1,1,0)x(0,1,1)[12]','SARIMA(1,1,1)x(0,1,1)[12]',
+               'SARIMA(0,1,1)x(1,1,0)[12]','SARIMA(1,1,0)x(1,1,0)[12]','SARIMA(1,1,1)x(1,1,0)[12]'),
+    AIC = c(model_sea_1$aic, model_sea_2$aic, model_sea_3$aic,model_sea_4$aic,model_sea_5$aic,
+            model_sea_6$aic, model_sea_7$aic, model_sea_8$aic,model_sea_9$aic), 
+    'log likelihood'=c(model_sea_1$loglik,model_sea_2$loglik,model_sea_3$loglik,
+                       model_sea_4$loglik,model_sea_5$loglik,model_sea_6$loglik,
+                       model_sea_7$loglik,model_sea_7$loglik,model_sea_9$loglik),
+    BIC = c(c(model_sea_1$bic, model_sea_2$bic, model_sea_3$bic,model_sea_4$bic,model_sea_5$bic,
+            model_sea_6$bic, model_sea_7$bic, model_sea_8$bic,model_sea_9$bic)),
+    stringsAsFactors = FALSE
+)
+df
+```
+
+From the table of results, we observe the Akaike Information Criterion (AIC), log-likelihood, and Bayesian Information Criterion (BIC) values for different models. Lower values of AIC, log-likelihood, and BIC indicate better model fit and parsimony.
+After analyzing the model results, two models stand out as the most promising candidates, these are model 4 and model 1. The first model, SARIMA(0,1,1)x(0,1,1)[12], exhibits a relatively low AIC of -483.8448 and BIC of -475.2192, suggesting a good balance between model fit and complexity.  The second model, SARIMA(0,1,1)x(1,1,1)[12], also demonstrates strong performance with an AIC of -482.3055 and BIC of -470.8047. However, it's worth noting that the value of log-likelihood does not consistently align with the trend of AIC and BIC. Thus, we can disregard this value in our evaluation. These two models appear as top contenders based on their performance metrics, warranting further evaluation to determine the optimal choice for forecasting purposes.
+
+### Residual Analysis:
+
+Model diagnostics involve assessing the goodness of fit of a model and suggesting appropriate modifications if the fit is inadequate. Residuals play a crucial role in evaluating whether a model effectively captures the information present in the data. These residuals represent the discrepancy between the observed values and the corresponding predicted values, calculated as residuals = observed - predicted. An essential step in diagnostics is to ensure that the standardized residuals adhere to the characteristics of standard Normal White Noise, typically verified using the Shapiro-Wilk normality test. Subsequently, plotting the residuals allows for the assessment of significant residual autocorrelation (via Sample ACF and PACF), normality (via Q-Q plots and histograms), and consistent variance. Furthermore, the Ljung-Box test serves as a common method for testing against residual autocorrelation, evaluating the null hypothesis that a series of residuals demonstrates no autocorrelation.
+
+From the aforementioned models, we have selected two candidates for residual analysis: Model 4, SARIMA(0,1,1)x(0,1,1)[12], and Model 1, SARIMA(0,1,1)x(1,1,1)[12]. 
+
+
+- Initially, we plot the residuals against the processed seasonal data for Model 4. 
+
+
+```{r,echo=FALSE}
+truck_fit=cbind(seasonal_data, model_sea_4$residuals[14:144]) # merge with the fitted values 
+matplot(1:length(seasonal_data) ,truck_fit, ylab = "",xlab="Time", type = "l", main=expression(paste('SARIMA(0,1,1)x(0,1,1)[12]')), lwd=1.8)
+legend("top",c("seasonal data", "residuals"), lty=c(1,2), col=c(1,2), lwd=1.8)
+```
+
+The resulting plot indicates that the residuals exhibit a mean of 0 and display consistent variance. Moreover, the shape of the residuals closely resembles that of the processed seasonal data.
+
+```{r,echo=FALSE}
+par(mfrow=c(1,2))
+acf(as.vector(model_sea_4$residuals), lag.max = 50, main='Model 4')
+pacf(as.vector(model_sea_4$residuals), lag.max = 50, main='Model 4')
+```
+
+Upon examination of the ACF plot spanning 50 lags, the majority of the autocorrelation coefficients fall within the confidence interval, indicating no significant autocorrelation between the residuals. However, a notable exception occurs at lag 23, where a deviation from the confidence interval is observed. Despite this isolated occurrence, the overall pattern suggests that the residuals conform well to the assumptions of the model. As a result, we can confidently accept this model as a suitable representation of the data.
+
+```{r,echo=FALSE}
+par(mfrow=c(1,2))
+qqnorm(model_sea_4$residuals,col='blue')
+qqline(model_sea_4$residuals, col='red')
+hist(model_sea_4$residuals, main='The histogram of Model 4',xlab='residuals')
+```
+
+
+
+```{r,echo=FALSE}
+shapiro.test(model_sea_4$residuals)
+```
+
+The normality of residuals can be inferred from Q-Q plots and histograms. Upon conducting the Shapiro-Wilk normality test, we obtained a p-value of 0.1565, leading us to accept the null hypothesis, indicating that the residuals adhere to a normal distribution.
+
+```{r,echo=FALSE}
+tsdiag(model_sea_4)
+```
+
+Based on the Ljung-Box statistic derived from the plot above, we observe that all lags exceed 0.05. Therefore, we accept the null hypothesis of no autocorrelation.
+
+- We will perform a similar check for Model 1:
+
+```{r,echo=FALSE}
+truck_fit_1=cbind(seasonal_data, model_sea_1$residuals[14:144]) # merge with the fitted values 
+matplot(1:length(seasonal_data) ,truck_fit_1, ylab = "",xlab="Time", type = "l", main=expression(paste('SARIMA(0,1,1)x(1,1,1)[12]')), lwd=1.8)
+legend("top",c("seasonal data", "residuals"), lty=c(1,2), col=c(1,2), lwd=1.8)
+```
+
+
+```{r,echo=FALSE}
+par(mfrow=c(1,2))
+acf(as.vector(model_sea_1$residuals), lag.max = 50,main='Model 1')
+pacf(as.vector(model_sea_1$residuals), lag.max = 50,main='Model 1')
+```
+
+The residuals plot in this model also exhibits a mean of 0 and consistent variance. However, there is a slight difference observed in the ACF plot. In addition to lag 23 extending beyond the confidence interval, lag 49 touches the interval as well.
+
+```{r,echo=FALSE}
+par(mfrow=c(1,2))
+qqnorm(model_sea_1$residuals, col='blue')
+qqline(model_sea_1$residuals,col='red')
+hist(model_sea_1$residuals, main="The histogram of Model 1", xlab="residuals")
+```
+
+```{r,echo=FALSE}
+shapiro.test(model_sea_1$residuals)
+```
+
+Regarding the Shapiro-Wilk normality test, this model also yields a p-value higher than the confidence interval, leading us to accept the null hypothesis. However, in the histogram, the shape appears to slightly deviate from normality compared to Model 4.
+
+```{r,echo=FALSE}
+tsdiag(model_sea_1)
+```
+
+
+Finally, based on the Ljung-Box statistic derived from the plot of Model 1, we observe that all lags exceed 0.05. Therefore, we also accept the null hypothesis of no autocorrelation.
+
+Considering the characteristics observed and the number of parameter, we suggest that Model 4 is the most suitable choice for forecasting purposes.
+
+### Forecasting
+
+One of the primary objectives of constructing a time series model is to forecast future values of the series accurately. Equally important is the evaluation of the precision of these forecasts.
+
+-To accomplish this step, we employ the forecast() function to generate forecasts from the model. We will set the hyperparameter with a 95% confidence interval and predict for the next 2 cycles based on the previous 12 cycles.
+```{r,warning=FALSE}
+forecast_model4<-Arima(ts(truck_data,frequency=12,start=(2003)),order=c(0, 1, 1), 
+                       seasonal=list(order = c(0, 1 , 1), period = 12),lambda = 0)
+forecast_values = forecast(forecast_model4,level=c(95),h=24)
+forecast_values
+```
+
+From the above table, it's evident that the points forecasted fall within the range defined by the low 95% and high 95% interval. This suggests that the forecasts have captured the uncertainty in the data and provide a reasonable range of potential outcomes. The narrow spread between the low and high intervals indicates a relatively high level of confidence in the forecasted values.
+```{r,echo=FALSE}
+plot(forecast_values, main="Forecasts 2015 and 2016 from Model 4", ylab="Monthly Truck Sales", xlab="Years")
+```
+
+Upon examining the forecast plot for 2015 and 2016 generated by Model 4, it becomes evident that the shape of each cycle closely resembles that of the original data. This indicates that the model has effectively captured the underlying patterns and seasonal fluctuations present in the data. Moreover, the consistency between the forecasted and observed shapes enhances the confidence in the model's predictive capability. It suggests that the model has successfully replicated the temporal dynamics of the series and provides reliable forecasts for future time periods.
+
+
+## Nonseasonal dataset:
+
+This dataset, obtained from Kaggle and collected from an authorized source (https://agmarknet.gov.in/), provides the prices of a wide range of vegetables in the year 2023. For this project, the price of garlic has been selected for analysis to determine its future trend.
+
+```{r,echo=FALSE}
+prices = read.csv("prices.csv")
+origin_data = prices$Garlic
+#prices_data = origin_data[1:(287-10)]
+prices_data = prices$Garlic
+plot(ts(prices_data),xlab='Time',ylab='Price', main="The prices of Garlic in the year 2023",
+     col='blue',lwd=2)
+```
+
+
+```{r,echo=FALSE}
+par(mfrow=c(1,2))
+#log_price = log(prices_data)
+acf(prices_data, lag.max = 20,main='ACF for the original dataset')
+pacf(prices_data, lag.max=20,main='PACF for the original dataset')
+```
+
+Based on the ACF plot, it appears to exhibit slow decay or persistence over many lags, indicating the presence of a unit root or a trend. However, the PACF plot either cuts off after 1 lag or decreases to zero relatively quickly following the exponential sin, suggesting non-stationarity. To ensure accuracy, further verification with the Dickey-Fuller Test is recommended.
+
+```{r,echo=FALSE}
+CADFtest(prices_data)
+```
+
+Based on the Augmented Dickey-Fuller (ADF) test results, conducted on the prices data, we obtained a test statistic of -1.8182 with a corresponding p-value of 0.5243. With a significance level typically set at 0.05, the p-value exceeds this threshold, indicating insufficient evidence to reject the null hypothesis. The null hypothesis states that the series has a unit root or is non-stationary. Therefore, based on these results, we fail to reject the null hypothesis, suggesting that the data likely possesses a unit root or exhibits non-stationarity.
+
+```{r,echo=FALSE}
+diff_prices = diff(prices_data)
+plot(ts(diff_prices), ylab='Prices of gralic',
+     col='blue',lwd=2, main='differencing series')
+CADFtest(diff_prices)
+```
+
+After applying first differencing method to the price series, we conducted another Augmented Dickey-Fuller (ADF) test. The results show a significant improvement in stationarity, with a p-value much lower than the commonly used significance level of 0.05 (p-value < 2.2e-16). Consequently, we reject the null hypothesis in favor of the alternative hypothesis, suggesting that the differenced series is stationary. The estimated delta value is -1.2, indicating a strong indication of stationarity. This transformation indicates that the original series had a unit root or non-stationarity, which was successfully addressed through differencing, ensuring that the data is now suitable for further time series analysis.
+
+```{r, echo=FALSE}
+par(mfrow=c(1,2))
+acf(as.vector(diff_prices), lag.max = 20, main='ACF for diff series')
+pacf(as.vector(diff_prices), lag.max=20, main='PACF for diff series')
+par(mfrow=c(1,2))
+cat('The EACF for diff(log) series\n')
+eacf(diff_prices)
+```
+In both the ACF and PACF plots, we observe that they both cut off after lag 1. Hence, we have decided to consider values of 0 or 1 for both p and q in the ARIMA model selection. Additionally, in the Extended Autocorrelation Function (EACF), several triangles emerge, notably with a vertex at (0,1), (1,1), and (2,1). As a result, potential models include ARIMA(1,1,0), ARIMA(1,1,1), ARIMA(0,1,1), and ARIMA(2,1,1). These model specifications are derived from the observed patterns in autocorrelation and partial autocorrelation functions, providing a solid foundation for further time series analysis and forecasting.
+
+```{r, echo=FALSE}
+model_nonsea_1 = arima(prices_data, order=c(1, 1, 0))
+model_nonsea_2 =arima(prices_data, order=c(0, 1, 1))
+model_nonsea_3 =arima(prices_data, order=c(1, 1, 1))
+model_nonsea_4 =arima(prices_data, order=c(2, 1, 1))
+model_nonsea_1; model_nonsea_2; model_nonsea_3; model_nonsea_4
+```
+
+```{r,echo=FALSE}
+bic_nonsea_1=BIC(model_nonsea_1)
+bic_nonsea_2=BIC(model_nonsea_2)
+bic_nonsea_3=BIC(model_nonsea_3)
+bic_nonsea_4=BIC(model_nonsea_4)
+```
+
+```{r,echo=FALSE}
+df_2 = data.frame(
+    Index = c(1:4),
+    Models = c('ARIMA(1,1,0)', 'ARIMA(0,1,1)','ARIMA(1,1,1)','ARIMA(2,1,1)'),
+    AIC = c(model_nonsea_1$aic, model_nonsea_2$aic, model_nonsea_3$aic,
+            model_nonsea_4$aic), 
+    'log likelihood'=c(model_nonsea_1$loglik,model_nonsea_2$loglik,
+                       model_nonsea_3$loglik,model_nonsea_4$loglik),
+    BIC = c(bic_nonsea_1, bic_nonsea_2, bic_nonsea_3, bic_nonsea_4),
+    stringsAsFactors = FALSE
+)
+print(df_2)
+```
+
+Comparing the models, we see that ARIMA(0,1,1) has the lowest AIC (1918.559) and BIC (1927.871) values, indicating a good balance between model fit and complexity. Following this, ARIMA(1,1,0) possesses the next lowest AIC (1918.641) and BIC (1927.953), suggesting its competitiveness as well. Hence, ARIMA(0,1,1) and ARIMA(1,1,0) come out as the two best candidate models due to their lower AIC and BIC values. Further scrutiny through residual analysis and model validation would be prudent to confirm their suitability for forecasting.
+
+### ARCH or GARCH:
+
+While the ARIMA model accounts for autocorrelation in the data, it may not adequately address volatility clustering or heteroscedasticity in the residuals. In this case, we consider employing ARCH (Autoregressive Conditional Heteroscedasticity) or GARCH (Generalized Autoregressive Conditional Heteroscedasticity) models to capture any remaining volatility patterns in the residuals. To determine whether ARCH or GARCH models are appropriate, we examine the ACF and PACF plots of the squared residuals to detect significant autocorrelations. If these plots display significant autocorrelations, it suggests that garlic prices are not independently and identically distributed, providing evidence for the need to employ ARCH or GARCH models.
+
+## ARIMA-ARCH
+
+```{r,echo=FALSE}
+par(mfrow=c(1,2))
+acf(as.vector((model_nonsea_2$residuals)),main='Model 2 residuals')
+pacf(as.vector((model_nonsea_2$residuals)),main='Model 2 residuals')
+acf(as.vector((model_nonsea_2$residuals)^2),main='Squared residuals')
+pacf(as.vector((model_nonsea_2$residuals)^2),main='Squared residuals')
+```
+
+We observe that the plots of ACF and PACF for the squared residuals of the ARIMA(0,1,1) model exhibit some significant lags outside the confidence interval. This suggests the presence of autocorrelation in the squared residuals, indicating potential volatility clustering or heteroscedasticity. Consequently, considering ARCH or GARCH models for modeling the volatility dynamics may be appropriate. Based on the analysis of the plots, potential models such as GARCH(1,1), GARCH(2,1), and GARCH(3,1) are suggested. However, it's noted that the lag 3 of the PACF lies just outside the boundary without significant deviation. Therefore, to further explore the models, focus will be on evaluating the GARCH(1,1) and GARCH(2,1) specifications.
+
+```{r}
+eacf(as.vector((model_nonsea_2$residuals)^2))
+#eacf(as.vector((model_nonsea_1$residuals)^2))
+```
+
+Furthermore, the Extended Autocorrelation Function (EACF) reveals several distinctive triangles pattern at the various vertexes such as (0,1), (1,2), and (3,2).
+
+
+```{r,echo=FALSE,results='hide'}
+return_value = model_nonsea_2$residuals
+arima_garch_1 <- garch(x = return_value, order = c(1, 1))
+arima_garch_2 <- garch(x = return_value, order = c(2, 1))
+arima_garch_3 <- garch(x = return_value, order = c(1, 2))
+arima_garch_4 <- garch(x = return_value, order = c(3, 2))
+arima_arch <- garch(x = return_value, order = c(0, 1))
+return_value_1 = model_nonsea_1$residuals
+arima_garch_11 <- garch(x = return_value_1, order = c(1, 1))
+arima_garch_21 <- garch(x = return_value_1, order = c(2, 1))
+arima_garch_31 <- garch(x = return_value_1, order = c(1, 2))
+arima_garch_41 <- garch(x = return_value_1, order = c(3, 2))
+arima_arch_1 <- garch(x = return_value_1, order = c(0, 1))
+```
+
+```{r,echo=FALSE}
+df2 = data.frame(
+    Index = c(1:10),
+    Models = c('ARIMA(0,1,1)-GARCH(1,1)','ARIMA(0,1,1)-GARCH(2,1)',
+               'ARIMA(0,1,1)-GARCH(1,2)','ARIMA(0,1,1)-GARCH(3,2)',
+               'ARIMA(0,1,1)-ARCH(1)',
+               'ARIMA(1,1,0)-GARCH(1,1)','ARIMA(1,1,0)-GARCH(2,1)',
+               'ARIMA(1,1,0)-GARCH(1,2)','ARIMA(1,1,0)-GARCH(3,2)',
+               'ARIMA(1,1,0)-ARCH(1)'),
+    AIC = c(AIC(arima_garch_1), AIC(arima_garch_2), AIC(arima_garch_3), AIC(arima_garch_4), AIC(arima_arch),
+            AIC(arima_garch_11), AIC(arima_garch_21), AIC(arima_garch_31),AIC(arima_garch_41), AIC(arima_arch_1)),
+    stringsAsFactors = FALSE
+)
+print(df2)
+```
+
+The best model with the lowest AIC (1785.466) is ARIMA(0,1,1)-GARCH(3,2) and the next best model is ARIMA(0,1,1)-ARCH(1).
+
+```{r}
+summary(arima_garch_4);summary(arima_garch_41);summary(arima_arch)
+```
+
+Choosing ARIMA(0,1,1)-ARCH(1) as the significant parameters.
+
+## ARCH or GARCH
+
+Firstly, we transform the original data by taking the natural logarithm and then computing the differences between consecutive observations. Subsequently, we utilize ACF, PACF, and EACF to determine the appropriate number of parameters for the ARCH or GARCH model.
+
+```{r,echo=FALSE}
+diff.log.data = diff(log(prices_data))
+```
+
+From the ACF plot, we observe only one significant lag, while the PACF indicates one or two significant lags. This suggests potential models such as GARCH(1,1) and GARCH(2,1). Additionally, the EACF reveals a triangle at vertex (0,1) and (1,2), indicating the potential suitability of an ARCH(1) model.
+
+```{r,echo=FALSE}
+#arima_0 = Arima(prices_data, order=c(0, 1, 0), lambda = 0)
+arima_0 = Arima(diff.log.data, order=c(0, 0, 0))
+return_value_garch = arima_0$residuals
+par(mfrow=c(1,2))
+acf(return_value_garch**2, main="ACF of squared returns")
+pacf(return_value_garch**2, main="PACF of squared returns")
+eacf(return_value_garch**2)
+```
+
+From the ACF and PACF plots, we observe only one significant lag. This suggests potential models such as GARCH(1,1), ARCH(1), and GARCH(1,0). Additionally, the EACF reveals a triangle at vertex (0,1), (1,2), (2,3), (3,4), and (4,3).
+
+```{r, results='hide'}
+garch_model_1 <- garch(x = return_value_garch, order = c(1, 1))
+garch_model_2 <- garch(x = return_value_garch, order = c(1, 0))
+garch_model_3 <- garch(x = return_value_garch, order = c(1, 2))
+garch_model_4 <- garch(x = return_value_garch, order = c(2, 3))
+garch_model_5 <- garch(x = return_value_garch, order = c(3, 4))
+garch_model_6 <- garch(x = return_value_garch, order = c(4, 3))
+arch_model <- garch(x = return_value_garch, order = c(0, 1))
+```
+
+```{r,echo=FALSE}
+df3 = data.frame(
+    Index = c(1:7),
+    Models = c('GARCH(1,1)','GARCH(1,0)','GARCH(1,2)','GARCH(2,3)',
+               'GARCH(3,4)','GARCH(4,3)','ARCH(1)'),
+    AIC = c(AIC(garch_model_1), AIC(garch_model_2),AIC(garch_model_3), 
+            AIC(garch_model_4),AIC(garch_model_5),AIC(garch_model_6),AIC(arch_model)),
+    stringsAsFactors = FALSE
+)
+print(df3)
+```
+
+Based on the above table, we see that the GARCH(1,1) model is the preferred choice as it has the lowest AIC value, indicating the best balance between model complexity and goodness of fit.
+
+```{r,echo=FALSE}
+summary(garch_model_1)
+```
+
+### Residual Analysis:
+
+Next, we can conduct a residual analysis for these models to evaluate its fit.
+
++ ARIMA(0,1,1)-ARCH(1):
+
+
+```{r,echo=FALSE}
+par(mfrow=c(2,1))
+acf(residuals(arima_arch)^2,na.action=na.omit, main="The squared residuals of ARIMA(0,1,1)-ARCH(1)")
+pacf(residuals(arima_arch)^2,na.action=na.omit, main="The squared residuals of ARIMA(0,1,1)-ARCH(1)")
+```
+
+
+```{r}
+gBox(arima_arch,method='squared')
+```
+
+```{r,echo=FALSE}
+num_lag = 20
+Ljung_box = vector(length=num_lag)
+for (i in 1:num_lag){
+  Ljung_box[i] = Box.test(resid(arima_garch_11),lag = i, type = "Ljung")$p.value
+}
+
+df_4 = data.frame(
+    Lags = c(1:20),
+    "Ljung_box p_value" = Ljung_box,
+    stringsAsFactors = FALSE
+)
+plot(df_4, main = "Ljung Box Statistic", ylab="p-value",ylim=c(0,1))
+abline(h=0.05,col='red',lty=2)
+```
+
+
+All p-values are higher than 5%, suggesting that the squared residuals are uncorrelated over time, and hence the standardized residuals may be independent.
+
+
++ GARCH(1,1):
+
+```{r,echo=FALSE}
+par(mfrow=c(2,1))
+acf(residuals(garch_model_1)^2,na.action=na.omit, main="The squared residuals of GARCH(1,1)")
+pacf(residuals(garch_model_1)^2,na.action=na.omit, main="The squared residuals of GARCH(1,1)")
+```
+
+```{r}
+gBox(garch_model_1,method='squared')
+```
+
+The plots of ACF and PACF for the squared residuals of the GARCH(1,1) model exhibit no lags outside the confidence interval. This indicates that the model adequately captures the volatility patterns in the data, as there are no systematic patterns or dependencies remaining in the squared residuals after accounting for the GARCH(1,1) process.
+
+```{r,echo=FALSE}
+num_lag = 20
+Ljung_box_1 = vector(length=num_lag)
+for (i in 1:num_lag){
+  Ljung_box_1[i] = Box.test(resid(garch_model_1),lag = i, type = "Ljung")$p.value
+}
+
+df_5 = data.frame(
+    Lags = c(1:20),
+    "Ljung_box p_value" = Ljung_box_1,
+    stringsAsFactors = FALSE
+)
+plot(df_5, main="Ljung Box Statistic", ylab="p-value", ylim=c(0,1))
+abline(h=0.05,col='red',lty=2)
+```
+
+```{r,echo=FALSE}
+par(mfrow=c(1,2))
+qqnorm(residuals(garch_model_1), col='blue')
+qqline(residuals(garch_model_1),col='red')
+hist(residuals(garch_model_1),main="The residuals of GARCH(1,1)")
+```
+
+In both the Q-Q plot and histogram, the observed distribution deviates noticeably from a normal distribution, showing a shape that is not typical. Moreover, there are several points at the beginning and end of the distribution that appear to deviate significantly from the expected pattern, raising suspicions about the normality assumption. To verify the distribution's assumptions, additional model diagnostics can be conducted.
+
+```{r,echo=FALSE}
+shapiro.test(na.omit(residuals(garch_model_1)))
+jarque.bera.test(na.omit(residuals(garch_model_1)))
+skew = skewness(na.omit(residuals(garch_model_1)))
+kur = kurtosis(na.omit(residuals(garch_model_1)))
+cat("The Skewness is ", round(skew,2), " and the Kurtosis is", round(kur,2))
+```
+
+From the provided results, the p-values obtained from the Shapiro-Wilk normality test and Jarque Bera Test both approach zero, indicating rejection of the null hypothesis, which suggests that the data is not normally distributed. Additionally, the skewness value falls within the range of -0.5 to 0.5, indicating nearly symmetrical distribution of values. However, the kurtosis values exceeding zero suggest a light-tailed distribution with a steeper peak, commonly referred to as positive kurtosis or leptokurtic distribution.
+
+
+
+
+### Forecasting
+
+### 1. ARIMA(0,1,1)-ARCH(1):
+
+```{r,echo=FALSE,warning=FALSE}
+spec_arga = ugarchspec(variance.model = list(model = "sGARCH",
+                                        garchOrder = c(1, 0),
+                                        submodel = NULL,
+                                        external.regressors = NULL,
+                                        variance.targeting = FALSE),
+                  mean.model     = list(armaOrder = c(0,1),
+                                        external.regressors = NULL,
+                                        arfima = TRUE),
+                  fixed.pars=list(arfima=1),
+                  distribution.model = "norm")
+fit_arga <- ugarchfit(spec = spec_arga, data = prices_data, solver.control=list(trace=0))
+
+plot(fit_arga,which="all")
+```
+
+```{r,echo=FALSE}
+forecast_arga = ugarchforecast(fitORspec = fit_arga, n.ahead = 10)
+series_arga<- c(tail(prices_data,50),rep(NA,length(fitted(forecast_arga))))
+forecastseries_arga<- c(rep(NA,50),fitted(forecast_arga))
+forecastplusu_arga<- c(rep(NA,50),fitted(forecast_arga)+1.96*sigma(forecast_arga))
+forecastminusu_arga<- c(rep(NA,50),fitted(forecast_arga)-1.96*sigma(forecast_arga))
+plot(series_arga, main = "Series (Last 50 Obs) + Forecast 10 days by ARIMA(0,1,1)-ARCH(1)",
+     ylab="Prices", lwd=2, type = "l")
+lines(forecastseries_arga, col = "red",lty=2, lwd=2)
+lines(forecastplusu_arga,col = "blue",lty=2, lwd=2)
+lines(forecastminusu_arga,col = "blue",lty=2, lwd=2)
+legend("topleft", legend = c("Last 50 Obs","Forecast intervals","Forecase 10 days"), 
+       col = c("black","blue", "red","green","purple"),
+       lty = c(1, 2, 2), lwd = c(2,2,2))
+```
+
+
+
+
+
+
+
+### 2. GARCH(1,1):
+
+
+```{r,echo=FALSE,warning=FALSE}
+spec_garch = ugarchspec(variance.model = list(model = "sGARCH",
+                                        garchOrder = c(1, 1),
+                                        submodel = NULL,
+                                        external.regressors = NULL,
+                                        variance.targeting = FALSE),
+                  mean.model     = list(armaOrder = c(0,0),
+                                        external.regressors = NULL,
+                                        arfima = TRUE),
+                  fixed.pars=list(arfima=1,lambda = 0),
+                  distribution.model = "norm")
+fit_garch <- ugarchfit(spec = spec_garch, data = prices_data, solver.control=list(trace=0))
+plot(fit_garch, which = "all")
+```
+
+```{r}
+forecast_garch = ugarchforecast(fitORspec = fit_garch, n.ahead = 10)
+series_garch<- c(tail(prices_data,50),rep(NA,length(fitted(forecast_garch))))
+forecastseries_garch<- c(rep(NA,50),fitted(forecast_garch))
+forecastplusu_garch<- c(rep(NA,50),fitted(forecast_garch)+1.96*sigma(forecast_garch))
+forecastminusu_garch<- c(rep(NA,50),fitted(forecast_garch)-1.96*sigma(forecast_garch))
+plot(series_garch, main = "Series (Last 50 Obs) + Forecast 10 days",
+     ylab="Prices", type = "l",lwd=2)
+lines(forecastseries_garch, col = "red",lty=2,lwd=2)
+lines(forecastplusu_garch,col = "blue",lty=2,lwd=2)
+lines(forecastminusu_garch,col = "blue",lty=2,lwd=2)
+legend("topleft", legend = c("Last 50 Obs","Forecast intervals","Forecase 10 days"), 
+       col = c("black","blue", "red"),
+       lty = c(1, 2, 2), lwd = c(2,2,2))
+```
+
+
+
+
+```{r,echo=FALSE}
+data <- data.frame(
+  Models = rep(c("ARIMA(0,1,1)-ARCH(1)", "GARCH(1,1)"), each = 10),
+  Value = c(fitted(forecast_arga), fitted(forecast_garch))
+)
+
+ggplot(data, aes(x = Models, y = Value,color = Models)) +
+  geom_jitter(width = 0.1, height = 0) + 
+  labs(x = "Models", y = "Value") +
+  ggtitle("Comparison of Models") +
+  geom_line()+
+  theme_minimal()
+```
+
+
+
+
